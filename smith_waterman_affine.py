@@ -195,9 +195,8 @@ def print_blast_like(aln1: str, aln2: str, score, start1: int, start2: int, widt
 def main():
     gap_open = 11
     gap_extend = 1
-    width = 60
-    seq1_path = "fasta/seq1.fasta"
-    seq2_path = "fasta/seq2.fasta"
+    seq1_path = "fasta/mouse_seq.fasta"
+    seq2_path = "fasta/thaliana_seq.fasta"
     matrix_path = "blossum62.txt"
     s1 = read_fasta_one_sequence(seq1_path)
     s2 = read_fasta_one_sequence(seq2_path)
@@ -220,7 +219,7 @@ def main():
     print("Aligned seq2:")
     print(aln2)
     print()
-    print_blast_like(aln1, aln2, Score, s1_start, s2_start, width=width)
+    print_blast_like(aln1, aln2, Score, s1_start, s2_start, width=60)
 
 
 if __name__ == "__main__":
