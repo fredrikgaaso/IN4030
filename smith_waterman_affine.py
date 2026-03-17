@@ -1,226 +1,233 @@
-def read_fasta_one_sequence(path: str) -> str:
-    seq_lines = []
-
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                # If we already collected a sequence, stop at next header
-                if seq_lines:
-                    break
-                continue
-            # Accept sequence lines
-            seq_lines.append(line)
-
-    if not seq_lines:
-        raise ValueError(f"No sequence found in {path}")
-
-    return "".join(seq_lines).replace(" ", "").upper()
+from enum import IntEnum
+import numpy as np
+import blosum
 
 
-def read_scoring_matrix(path: str):
-    # Read non-empty, non-comment lines
-    lines = []
-    with open(path, "r", encoding="utf-8") as f:
-        for ln in f:
-            ln = ln.strip()
-            if not ln or ln.startswith("#"):
-                continue
-            lines.append(ln)
+class Trace(IntEnum):
+    STOP = 0
+    LEFT = 1
+    UP = 2
+    DIAGONAL = 3
 
-    if not lines:
-        raise ValueError(f"Matrix file '{path}' is empty or only comments.")
 
-    # Header: first line should be the column symbols
-    header = lines[0].split()
-    cols = header
+def fasta_reader(sequence_file):
+    lines = open(sequence_file).readlines()
+    sequence_name_row = lines[0][1:]
+    sequence = ""
+    for line in lines[1:]:
+        sequence += line.strip()
+    return sequence_name_row.replace(" ", "").strip(), sequence.strip()
 
-    score = {a: {} for a in cols}
 
-    # Rows: each subsequent line: RowSymbol then scores for each column
-    for ln in lines[1:]:
-        toks = ln.split()
-        if len(toks) < len(cols) + 1:
-            continue
-        row = toks[0]
-        vals = toks[1:len(cols) + 1]
-        if row not in score:
-            score[row] = {}
-        for c, v in zip(cols, vals):
-            score[row][c] = int(v)
+def smith_waterman_affine(seq1, seq2, score_matrix, gap_open, gap_extend):
+    row = len(seq1) + 1
+    col = len(seq2) + 1
 
-    # Make symmetric fallback (BLOSUM62 is symmetric)
-    for a in list(score.keys()):
-        for b, v in score[a].items():
-            score.setdefault(b, {})
-            score[b].setdefault(a, v)
+    open_cost = gap_open + gap_extend
 
-    return score
+    # Generating the empty matrices for storing scores
+    matrix_M = np.zeros(shape=(row, col), dtype=float)
+    matrix_Ix = np.zeros(shape=(row, col), dtype=float)
+    matrix_Iy = np.zeros(shape=(row, col), dtype=float)
 
-def sw_affine_local_alignment(s1: str, s2: str, score, gap_open: int, gap_extend: int):
-    n, m = len(s1), len(s2)
+    # Generating the empty matrices for tracing
+    tracing_M = np.zeros(shape=(row, col), dtype=int)
+    tracing_Ix = np.zeros(shape=(row, col), dtype=int)
+    tracing_Iy = np.zeros(shape=(row, col), dtype=int)
 
-    open_cost = gap_open + gap_extend  # first gap char cost
-    ext_cost  = gap_extend            # additional gap chars
+    # Initialising the variables to find the highest scoring cell
+    max_score = -1
+    max_index = (-1, -1)
+    max_matrix = "M"
 
-    # DP matrices
-    M  = [[0] * (m + 1) for _ in range(n + 1)]
-    Ix = [[0] * (m + 1) for _ in range(n + 1)]
-    Iy = [[0] * (m + 1) for _ in range(n + 1)]
+    # Calculating the scores for all cells in the matrix
+    for i in range(1, row):
+        for j in range(1, col):
 
-    # Pointers: store (prev_matrix, prev_i, prev_j) or None if reset to 0
-    PM  = [[None] * (m + 1) for _ in range(n + 1)]
-    PIx = [[None] * (m + 1) for _ in range(n + 1)]
-    PIy = [[None] * (m + 1) for _ in range(n + 1)]
+            # Calculating Ix scores (gap in seq2, move up)
+            ix_from_M = matrix_M[i - 1, j] - open_cost
+            ix_from_Ix = matrix_Ix[i - 1, j] - gap_extend
+            ix_from_Iy = matrix_Iy[i - 1, j] - open_cost
 
-    best_score = 0
-    best_pos = (0, 0, "M")  # (i, j, matrix)
+            matrix_Ix[i, j] = max(0, ix_from_M, ix_from_Ix, ix_from_Iy)
 
-    for i in range(1, n + 1):
-        a = s1[i - 1]
-        for j in range(1, m + 1):
-            b = s2[j - 1]
+            if matrix_Ix[i, j] == 0:
+                tracing_Ix[i, j] = Trace.STOP
+            elif matrix_Ix[i, j] == ix_from_Ix:
+                tracing_Ix[i, j] = Trace.UP
+            elif matrix_Ix[i, j] == ix_from_M:
+                tracing_Ix[i, j] = Trace.DIAGONAL
+            elif matrix_Ix[i, j] == ix_from_Iy:
+                tracing_Ix[i, j] = Trace.LEFT
 
-            # Ix: gap in s2 (move up: i-1, j)
-            candidates_ix = [
-                (0, None),
-                (M[i - 1][j]  - open_cost, ("M",  i - 1, j)),
-                (Ix[i - 1][j] - ext_cost,  ("Ix", i - 1, j)),
-                (Iy[i - 1][j] - open_cost, ("Iy", i - 1, j)),
-            ]
-            Ix[i][j], PIx[i][j] = max(candidates_ix, key=lambda x: x[0])
+            # Calculating Iy scores (gap in seq1, move left)
+            iy_from_M = matrix_M[i, j - 1] - open_cost
+            iy_from_Iy = matrix_Iy[i, j - 1] - gap_extend
+            iy_from_Ix = matrix_Ix[i, j - 1] - open_cost
 
-            # Iy: gap in s1 (move left: i, j-1)
-            candidates_iy = [
-                (0, None),
-                (M[i][j - 1]  - open_cost, ("M",  i, j - 1)),
-                (Iy[i][j - 1] - ext_cost,  ("Iy", i, j - 1)),
-                (Ix[i][j - 1] - open_cost, ("Ix", i, j - 1)),
-            ]
-            Iy[i][j], PIy[i][j] = max(candidates_iy, key=lambda x: x[0])
+            matrix_Iy[i, j] = max(0, iy_from_M, iy_from_Iy, iy_from_Ix)
 
-            # M: match/mismatch (diag: i-1, j-1)
-            sub = score[a][b]
-            candidates_m = [
-                (0, None),
-                (M[i - 1][j - 1]  + sub, ("M",  i - 1, j - 1)),
-                (Ix[i - 1][j - 1] + sub, ("Ix", i - 1, j - 1)),
-                (Iy[i - 1][j - 1] + sub, ("Iy", i - 1, j - 1)),
-            ]
-            M[i][j], PM[i][j] = max(candidates_m, key=lambda x: x[0])
+            if matrix_Iy[i, j] == 0:
+                tracing_Iy[i, j] = Trace.STOP
+            elif matrix_Iy[i, j] == iy_from_Iy:
+                tracing_Iy[i, j] = Trace.LEFT
+            elif matrix_Iy[i, j] == iy_from_M:
+                tracing_Iy[i, j] = Trace.DIAGONAL
+            elif matrix_Iy[i, j] == iy_from_Ix:
+                tracing_Iy[i, j] = Trace.UP
 
-            # track best among all three
-            for mat, val in (("M", M[i][j]), ("Ix", Ix[i][j]), ("Iy", Iy[i][j])):
-                if val > best_score:
-                    best_score = val
-                    best_pos = (i, j, mat)
+            # Calculating M scores (match/mismatch, diagonal)
+            substitution = score_matrix[seq1[i - 1]][seq2[j - 1]]
+            m_from_M = matrix_M[i - 1, j - 1] + substitution
+            m_from_Ix = matrix_Ix[i - 1, j - 1] + substitution
+            m_from_Iy = matrix_Iy[i - 1, j - 1] + substitution
 
-    # Traceback from best_pos until score 0
-    i, j, mat = best_pos
-    aln1, aln2 = [], []
+            matrix_M[i, j] = max(0, m_from_M, m_from_Ix, m_from_Iy)
 
-    def get_score(ii, jj, mm):
-        return M[ii][jj] if mm == "M" else (Ix[ii][jj] if mm == "Ix" else Iy[ii][jj])
+            if matrix_M[i, j] == 0:
+                tracing_M[i, j] = Trace.STOP
+            elif matrix_M[i, j] == m_from_M:
+                tracing_M[i, j] = Trace.DIAGONAL
+            elif matrix_M[i, j] == m_from_Ix:
+                tracing_M[i, j] = Trace.UP
+            elif matrix_M[i, j] == m_from_Iy:
+                tracing_M[i, j] = Trace.LEFT
 
-    while i > 0 and j > 0 and get_score(i, j, mat) > 0:
-        if mat == "M":
-            prev = PM[i][j]
-            if prev is None:
+            # Tracking the cell with the maximum score
+            for mat_name, val in [("M", matrix_M[i, j]),
+                                   ("Ix", matrix_Ix[i, j]),
+                                   ("Iy", matrix_Iy[i, j])]:
+                if val >= max_score:
+                    max_index = (i, j)
+                    max_score = val
+                    max_matrix = mat_name
+
+    # Initialising the variables for tracing
+    aligned_seq1 = ""
+    aligned_seq2 = ""
+    current_aligned_seq1 = ""
+    current_aligned_seq2 = ""
+    (max_i, max_j) = max_index
+    current_matrix = max_matrix
+
+    # Tracing and computing the pathway with the local alignment
+    while True:
+        if current_matrix == "M":
+            if tracing_M[max_i, max_j] == Trace.STOP:
                 break
-            aln1.append(s1[i - 1])
-            aln2.append(s2[j - 1])
-            mat, i, j = prev
-        elif mat == "Ix":
-            prev = PIx[i][j]
-            if prev is None:
-                break
-            aln1.append(s1[i - 1])
-            aln2.append("-")
-            mat, i, j = prev
-        else:  # Iy
-            prev = PIy[i][j]
-            if prev is None:
-                break
-            aln1.append("-")
-            aln2.append(s2[j - 1])
-            mat, i, j = prev
+            current_aligned_seq1 = seq1[max_i - 1]
+            current_aligned_seq2 = seq2[max_j - 1]
 
-    aln1.reverse()
-    aln2.reverse()
-    aligned_s1 = "".join(aln1)
-    aligned_s2 = "".join(aln2)
+            if tracing_M[max_i, max_j] == Trace.DIAGONAL:
+                next_matrix = "M"
+            elif tracing_M[max_i, max_j] == Trace.UP:
+                next_matrix = "Ix"
+            elif tracing_M[max_i, max_j] == Trace.LEFT:
+                next_matrix = "Iy"
 
-    # Compute start/end (1-based inclusive) using best end indices and consumed residues
-    end_i, end_j, _ = best_pos
-    consumed1 = sum(1 for c in aligned_s1 if c != "-")
-    consumed2 = sum(1 for c in aligned_s2 if c != "-")
+            max_i = max_i - 1
+            max_j = max_j - 1
+            current_matrix = next_matrix
+
+        elif current_matrix == "Ix":
+            if tracing_Ix[max_i, max_j] == Trace.STOP:
+                break
+            current_aligned_seq1 = seq1[max_i - 1]
+            current_aligned_seq2 = '-'
+
+            if tracing_Ix[max_i, max_j] == Trace.UP:
+                next_matrix = "Ix"
+            elif tracing_Ix[max_i, max_j] == Trace.DIAGONAL:
+                next_matrix = "M"
+            elif tracing_Ix[max_i, max_j] == Trace.LEFT:
+                next_matrix = "Iy"
+
+            max_i = max_i - 1
+            current_matrix = next_matrix
+
+        elif current_matrix == "Iy":
+            if tracing_Iy[max_i, max_j] == Trace.STOP:
+                break
+            current_aligned_seq1 = '-'
+            current_aligned_seq2 = seq2[max_j - 1]
+
+            if tracing_Iy[max_i, max_j] == Trace.LEFT:
+                next_matrix = "Iy"
+            elif tracing_Iy[max_i, max_j] == Trace.DIAGONAL:
+                next_matrix = "M"
+            elif tracing_Iy[max_i, max_j] == Trace.UP:
+                next_matrix = "Ix"
+
+            max_j = max_j - 1
+            current_matrix = next_matrix
+
+        aligned_seq1 = aligned_seq1 + current_aligned_seq1
+        aligned_seq2 = aligned_seq2 + current_aligned_seq2
+
+    # Reversing the order of the sequences
+    aligned_seq1 = aligned_seq1[::-1]
+    aligned_seq2 = aligned_seq2[::-1]
+
+    # Computing alignment positions (1-based)
+    end_i, end_j = max_index
+    consumed1 = sum(1 for c in aligned_seq1 if c != '-')
+    consumed2 = sum(1 for c in aligned_seq2 if c != '-')
     start_i = end_i - consumed1 + 1
     start_j = end_j - consumed2 + 1
 
-    return best_score, aligned_s1, aligned_s2, (start_i, end_i), (start_j, end_j)
+    return max_score, aligned_seq1, aligned_seq2, (start_i, end_i), (start_j, end_j)
 
 
-def print_blast_like(aln1: str, aln2: str, score, start1: int, start2: int, width: int = 60):
-    pos1, pos2 = start1, start2
+def print_blast_alignment(aligned_seq1, aligned_seq2, seq1_range, seq2_range, line_width=60):
+    """Print alignment in BLAST-like format"""
+    seq1_pos = seq1_range[0]
+    seq2_pos = seq2_range[0]
 
-    for k in range(0, len(aln1), width):
-        c1 = aln1[k:k+width]
-        c2 = aln2[k:k+width]
+    for block_start in range(0, len(aligned_seq1), line_width):
+        block1 = aligned_seq1[block_start:block_start + line_width]
+        block2 = aligned_seq2[block_start:block_start + line_width]
 
-        mid = []
-        for a, b in zip(c1, c2):
-            if a == "-" or b == "-":
-                mid.append(" ")
+        # Building the midline
+        midline = ""
+        for a, b in zip(block1, block2):
+            if a == '-' or b == '-':
+                midline += " "
             elif a == b:
-                mid.append("|")
+                midline += "|"
+            elif score_matrix[a][b] > 0:
+                midline += "+"
             else:
-                mid.append("+" if score[a][b] > 0 else " ")
-        mid = "".join(mid)
+                midline += " "
 
-        c1_used = sum(1 for x in c1 if x != "-")
-        c2_used = sum(1 for x in c2 if x != "-")
-        end1 = pos1 + c1_used - 1 if c1_used else pos1 - 1
-        end2 = pos2 + c2_used - 1 if c2_used else pos2 - 1
+        # Counting non-gap characters for position tracking
+        seq1_consumed = sum(1 for c in block1 if c != '-')
+        seq2_consumed = sum(1 for c in block2 if c != '-')
 
-        print(f"Query {pos1:>6}  {c1}  {end1}")
-        print(f"{'':12}  {mid}")
-        print(f"Sbjct {pos2:>6}  {c2}  {end2}\n")
+        seq1_end = seq1_pos + seq1_consumed - 1
+        seq2_end = seq2_pos + seq2_consumed - 1
 
-        pos1 += c1_used
-        pos2 += c2_used
+        print(f"Query  {seq1_pos:>6}  {block1}  {seq1_end}")
+        print(f"               {midline}")
+        print(f"Sbjct  {seq2_pos:>6}  {block2}  {seq2_end}")
+        print()
 
-
-def main():
-    gap_open = 11
-    gap_extend = 1
-    seq1_path = "fasta/mouse_seq.fasta"
-    seq2_path = "fasta/thaliana_seq.fasta"
-    matrix_path = "blossum62.txt"
-    s1 = read_fasta_one_sequence(seq1_path)
-    s2 = read_fasta_one_sequence(seq2_path)
-    Score = read_scoring_matrix(matrix_path)
-
-    best_score, aln1, aln2, (s1_start, s1_end), (s2_start, s2_end) = sw_affine_local_alignment(
-        s1, s2, Score, gap_open=gap_open, gap_extend=gap_extend
-    )
-
-    print("Local alignment (Smith–Waterman, affine gaps)")
-    print(f"Gap penalties: open={gap_open}, extend={gap_extend} (gap cost = open + extend*length)")
-    print()
-    print("Best local alignment score:", best_score)
-    print(f"Seq1 region: {s1_start}..{s1_end}")
-    print(f"Seq2 region: {s2_start}..{s2_end}")
-    print(f"Alignment length: {len(aln1)}")
-    print()
-    print("Aligned seq1:")
-    print(aln1)
-    print("Aligned seq2:")
-    print(aln2)
-    print()
-    print_blast_like(aln1, aln2, Score, s1_start, s2_start, width=60)
+        seq1_pos = seq1_end + 1
+        seq2_pos = seq2_end + 1
 
 
 if __name__ == "__main__":
-    main()
+    file_1_name, file_1 = fasta_reader("fasta/mouse_seq.fasta")
+    file_2_name, file_2 = fasta_reader("fasta/thaliana_seq.fasta")
+
+    score_matrix = blosum.BLOSUM(62)
+
+    best_score, aln1, aln2, range1, range2 = smith_waterman_affine(
+        file_1, file_2, score_matrix, gap_open=11, gap_extend=1
+    )
+
+    print(f"Best local alignment score: {best_score}")
+    print(f"Seq1 region: {range1[0]}..{range1[1]}")
+    print(f"Seq2 region: {range2[0]}..{range2[1]}")
+    print(f"Alignment length: {len(aln1)}")
+    print()
+    print_blast_alignment(aln1, aln2, range1, range2)
